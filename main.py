@@ -1,18 +1,15 @@
 from __future__ import annotations
 
 from datetime import datetime
-from typing import Dict, List, Optional
+from typing import List, Optional
 from uuid import UUID
+
 from fastapi import BackgroundTasks, FastAPI, HTTPException, Path, Query
 from fastapi.responses import JSONResponse
+from sqlalchemy import text
 
 from models.log import LogCreate, LogRead
-
-# -----------------------------------------------------------------------------
-# In-memory storage
-# -----------------------------------------------------------------------------
-logs: Dict[int, LogRead] = {}
-_next_id: int = 1
+from db import engine
 
 app = FastAPI(
     title="TripSpark Log Microservice",
@@ -21,23 +18,29 @@ app = FastAPI(
 )
 
 # -----------------------------------------------------------------------------
-# Background worker
+# Background worker: insert into DB
 # -----------------------------------------------------------------------------
-def store_log(log: LogCreate) -> None:
+def store_log_db(log: LogCreate) -> None:
     """
-    Simulated asynchronous DB insert.
+    Asynchronously insert a log row into the Cloud SQL database.
     """
-    global _next_id
-
-    log_id = _next_id
-    _next_id += 1
-
-    new_log = LogRead(
-        id=log_id,
-        created_at=datetime.utcnow(),
-        **log.model_dump(),
-    )
-    logs[log_id] = new_log
+    with engine.begin() as conn:
+        stmt = text(
+            """
+            INSERT INTO logs (user_id, user_name, place_name, rating, feedback, action)
+            VALUES (:user_id, :user_name, :place_name, :rating, :feedback, :action)
+            """
+        )
+        # UUID는 str로 변환해서 저장
+        params = {
+            "user_id": str(log.user_id),
+            "user_name": log.user_name,
+            "place_name": log.place_name,
+            "rating": log.rating,
+            "feedback": log.feedback,
+            "action": log.action,
+        }
+        conn.execute(stmt, params)
 
 
 # -----------------------------------------------------------------------------
@@ -47,9 +50,9 @@ def store_log(log: LogCreate) -> None:
 async def create_log(log: LogCreate, background_tasks: BackgroundTasks):
     """
     Accept a log entry asynchronously.
-    Returns 202 Accepted immediately.
+    Returns 202 Accepted immediately while the DB insert happens in the background.
     """
-    background_tasks.add_task(store_log, log)
+    background_tasks.add_task(store_log_db, log)
     return {"status": "accepted"}
 
 
@@ -62,34 +65,73 @@ def list_logs(
 ):
     """
     List log entries with optional filtering and pagination.
+    Backed by Cloud SQL.
     """
-    results = list(logs.values())
+    query = """
+        SELECT id, user_id, user_name, place_name, rating, feedback, action, created_at
+        FROM logs
+        WHERE 1=1
+    """
+    params: dict = {}
 
     if user_id is not None:
-        results = [l for l in results if l.user_id == user_id]
+        query += " AND user_id = :user_id"
+        params["user_id"] = str(user_id)
 
     if place_name is not None:
-        results = [l for l in results if l.place_name == place_name]
+        query += " AND place_name = :place_name"
+        params["place_name"] = place_name
 
-    # Sort newest first
-    results.sort(key=lambda x: x.created_at, reverse=True)
+    query += " ORDER BY created_at DESC LIMIT :limit OFFSET :offset"
+    params["limit"] = limit
+    params["offset"] = offset
 
-    return results[offset : offset + limit]
+    with engine.connect() as conn:
+        result = conn.execute(text(query), params).mappings().all()
+
+    return [LogRead(**row) for row in result]
 
 
 @app.get("/logs/{log_id}", response_model=LogRead)
-def get_log(log_id: int = Path(..., description="Numeric ID of the log entry.")):
+def get_log(
+    log_id: int = Path(..., description="Numeric ID of the log entry.")
+):
     """
-    Retrieve a single log entry by ID.
+    Retrieve a single log entry by ID from Cloud SQL.
     """
-    log = logs.get(log_id)
-    if not log:
+    query = """
+        SELECT id, user_id, user_name, place_name, rating, feedback, action, created_at
+        FROM logs
+        WHERE id = :id
+    """
+
+    with engine.connect() as conn:
+        row = conn.execute(text(query), {"id": log_id}).mappings().first()
+
+    if row is None:
         raise HTTPException(status_code=404, detail="Log not found")
-    return log
+
+    return LogRead(**row)
 
 
 # -----------------------------------------------------------------------------
-# NEW: Root endpoint (so '/' doesn't show Not Found)
+# DB connection test endpoint
+# -----------------------------------------------------------------------------
+@app.get("/dbtest")
+def test_db_connection():
+    """
+    Simple endpoint to verify Cloud SQL connectivity.
+    """
+    try:
+        with engine.connect() as conn:
+            result = conn.execute(text("SELECT 1")).scalar_one()
+        return {"status": "success", "result": int(result)}
+    except Exception as e:
+        return {"status": "error", "message": str(e)}
+
+
+# -----------------------------------------------------------------------------
+# Root endpoint
 # -----------------------------------------------------------------------------
 @app.get("/")
 def root():
