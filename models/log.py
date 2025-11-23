@@ -23,7 +23,7 @@ class LogBase(BaseModel):
         description="Place related to the action.",
         json_schema_extra={"example": "Tokyo"}
     )
-    rating: Optional[int] = Field(
+    rating: Optional[float] = Field(
         None,
         ge=1,
         le=5,
