@@ -13,8 +13,8 @@ from db import engine
 
 app = FastAPI(
     title="TripSpark Log Microservice",
-    description="Tracks user activity for TripSpark including places visited, ratings, and feedback.",
-    version="0.1.0",
+    description="Tracks user activity for TripSpark including places visited, ratings, and feedback. Backed by Cloud SQL.",
+    version="1.0.0",
 )
 
 # -----------------------------------------------------------------------------
@@ -31,7 +31,6 @@ def store_log_db(log: LogCreate) -> None:
             VALUES (:user_id, :user_name, :place_name, :rating, :feedback, :action)
             """
         )
-        # UUID는 str로 변환해서 저장
         params = {
             "user_id": str(log.user_id),
             "user_name": log.user_name,
@@ -87,9 +86,10 @@ def list_logs(
     params["offset"] = offset
 
     with engine.connect() as conn:
-        result = conn.execute(text(query), params).mappings().all()
+        rows = conn.execute(text(query), params).mappings().all()
 
-    return [LogRead(**row) for row in result]
+    # rows는 dict-like 객체 리스트이므로 그대로 Pydantic에 넣어줌
+    return [LogRead(**row) for row in rows]
 
 
 @app.get("/logs/{log_id}", response_model=LogRead)
@@ -131,9 +131,8 @@ def test_db_connection():
 
 
 # -----------------------------------------------------------------------------
-# Root endpoint
+# Root endpoint (health)
 # -----------------------------------------------------------------------------
 @app.get("/")
 def root():
-    return {"status": "TripSpark Log Service Running"}
-
+    return {"status": "TripSpark Log Service Running (DB-backed)"}
